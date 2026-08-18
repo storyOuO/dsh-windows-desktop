@@ -14,7 +14,7 @@
     "resolveJsonModule": true,
     "declaration": true,
     "sourceMap": true,
-    "lib": ["ES2022"],
+    "lib": ["ES2024"],
     "types": ["node"]
   },
   "include": ["electron/**/*.ts", "src/**/*.ts"],
