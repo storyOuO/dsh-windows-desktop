@@ -6,7 +6,7 @@
   "author": "jijiayue03 <jijiayue03@kuaishou.com>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jijiayue03/dsh-windows-desktop.git"
+    "url": "git+https://github.com/storyOuO/dsh-windows-desktop.git"
   },
   "main": "dist/main.js",
   "scripts": {
