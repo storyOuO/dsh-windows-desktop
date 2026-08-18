@@ -1,0 +1,25 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install -g pnpm@11
+      - run: pnpm install
+      - run: pnpm run build
+      - run: pnpm run pack
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/out/dsh-windows-desktop-*-setup.exe
+            build/out/dsh-windows-desktop-*-portable.exe
+          draft: true
