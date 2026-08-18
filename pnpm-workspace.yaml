@@ -1,20 +1,20 @@
 allowBuilds:
-  '@deepseek-ai/dsh-subprocess-local': set this to true or false
-  '@google/genai': set this to true or false
-  '@parcel/watcher': set this to true or false
-  bufferutil: set this to true or false
-  canvas: set this to true or false
-  edgedriver: set this to true or false
-  electron: set this to true or false
-  electron-winstaller: set this to true or false
-  esbuild: set this to true or false
-  geckodriver: set this to true or false
-  kerberos: set this to true or false
-  koffi: set this to true or false
-  msw: set this to true or false
-  node-pty: set this to true or false
-  protobufjs: set this to true or false
-  utf-8-validate: set this to true or false
+  electron: true
+  esbuild: true
+  '@parcel/watcher': true
+  '@deepseek-ai/dsh-subprocess-local': true
+  '@google/genai': false
+  bufferutil: false
+  canvas: false
+  edgedriver: false
+  electron-winstaller: true
+  geckodriver: false
+  kerberos: false
+  koffi: false
+  msw: false
+  node-pty: true
+  protobufjs: false
+  utf-8-validate: false
 minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-agent-default-model@0.1.0-rc.7'
   - '@deepseek-ai/dsh-agent-instructions@0.1.0-rc.7'
