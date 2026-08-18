@@ -6,7 +6,7 @@
  * @module electron/main
  */
 
-import { app, BrowserWindow, ipcMain, shell, nativeImage, Tray, Menu, safeStorage } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, nativeImage, Tray, Menu, safeStorage, dialog } from 'electron'
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { getFreePort } from './port'
@@ -23,6 +23,9 @@ const WINDOW_HEIGHT = 800
 /** Minimum window dimensions. */
 const MIN_WIDTH = 800
 const MIN_HEIGHT = 600
+
+/** Timeout for the entire bootstrap (dsh start + URL + HTTP ready): 45 s. */
+const BOOTSTRAP_TIMEOUT_MS = 45_000
 
 let dshProcess: DshProcess | undefined
 let trayManager: TrayManager | undefined
@@ -116,8 +119,21 @@ async function cleanup(): Promise<void> {
 }
 
 /**
+ * Show a fatal error dialog and quit. Used when the dsh backend fails to
+ * start — the user sees a clear message instead of a blank white window.
+ * @param title - dialog title.
+ * @param message - error details.
+ */
+function fatalDialog(title: string, message: string): void {
+  console.error(`${title}: ${message}`)
+  dialog.showErrorBox(title, message)
+  void cleanup().then(() => app.quit())
+}
+
+/**
  * App entry: allocate a port, start dsh, wait for it, show the window.
- * Runs after Electron's `ready` event.
+ * Runs after Electron's `ready` event. A bootstrap timeout prevents the app
+ * from hanging indefinitely if the dsh backend fails to start.
  */
 async function bootstrap(): Promise<void> {
   apiKeyStore = new ApiKeyStore(
@@ -139,11 +155,50 @@ async function bootstrap(): Promise<void> {
   dshProcess = new DshProcess({ port, env, logger: (line) => console.log(line) })
   dshProcess.start()
 
-  const urlInfo = await dshProcess.waitForUrl()
+  // Overall bootstrap timeout: if dsh doesn't come up within the window,
+  // show an error dialog instead of hanging with a blank window.
+  const timeoutController = new AbortController()
+  const bootstrapTimer = setTimeout(() => timeoutController.abort(), BOOTSTRAP_TIMEOUT_MS)
+
+  let urlInfo
+  try {
+    urlInfo = await dshProcess.waitForUrl(timeoutController.signal)
+  } catch (err) {
+    clearTimeout(bootstrapTimer)
+    const msg = err instanceof Error ? err.message : String(err)
+    fatalDialog(
+      'DeepSeek Harness — Backend Failed to Start',
+      `The dsh web backend did not start within ${String(BOOTSTRAP_TIMEOUT_MS / 1000)} seconds.\n\n${msg}`,
+    )
+    return
+  }
+
+  // If the child exited immediately and returned an empty URL, treat as failure.
+  if (urlInfo.port === 0) {
+    clearTimeout(bootstrapTimer)
+    fatalDialog(
+      'DeepSeek Harness — Backend Failed to Start',
+      'The dsh web backend exited before it was ready. Check the application logs for details.',
+    )
+    return
+  }
+
   const url = `http://127.0.0.1:${String(urlInfo.port)}`
 
   // Wait for HTTP readiness (the URL line means the server is listening).
-  await waitForReady({ url, timeoutMs: 15_000 })
+  try {
+    await waitForReady({ url, timeoutMs: 15_000, signal: timeoutController.signal })
+  } catch (err) {
+    clearTimeout(bootstrapTimer)
+    const msg = err instanceof Error ? err.message : String(err)
+    fatalDialog(
+      'DeepSeek Harness — Backend Not Ready',
+      `The dsh web backend started but did not respond to HTTP.\n\n${msg}`,
+    )
+    return
+  }
+
+  clearTimeout(bootstrapTimer)
 
   const win = createWindow(url)
 
@@ -179,8 +234,8 @@ if (!gotLock) {
 
   app.whenReady().then(() => {
     void bootstrap().catch((err) => {
-      console.error('main: bootstrap failed:', err)
-      app.quit()
+      const msg = err instanceof Error ? err.message : String(err)
+      fatalDialog('DeepSeek Harness — Startup Error', msg)
     })
   })
 
@@ -195,8 +250,8 @@ if (!gotLock) {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       void bootstrap().catch((err) => {
-        console.error('main: bootstrap failed on activate:', err)
-        app.quit()
+        const msg = err instanceof Error ? err.message : String(err)
+        fatalDialog('DeepSeek Harness — Startup Error', msg)
       })
     }
   })

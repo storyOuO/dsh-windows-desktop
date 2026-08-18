@@ -2,6 +2,11 @@
  * dsh child-process manager: resolves the dsh bin, spawns it with the right
  * Node binary, collects stdout/stderr, parses the URL line, and owns the
  * process lifecycle (graceful SIGTERM → forceful kill).
+ *
+ * In a packaged Electron app, `process.execPath` is the Electron binary.
+ * Setting `ELECTRON_RUN_AS_NODE=1` in the child env makes it behave as a
+ * plain Node.js runtime — without this, `spawn` opens a second blank
+ * Electron window instead of running dsh.
  * @module electron/dsh-process
  */
 
@@ -21,6 +26,8 @@ export interface DshProcessOptions {
   nodePath?: string
   /** Logger for stdout/stderr lines (e.g. console.log). */
   logger?: (line: string) => void
+  /** Timeout in ms for waitForUrl; defaults to 30 s. */
+  urlTimeoutMs?: number
 }
 
 /** Parsed URL line emitted by dsh web. */
@@ -33,6 +40,12 @@ export interface DshUrlInfo {
 /** Match `dsh web: http://127.0.0.1:3080` (optionally followed by LAN info). */
 const URL_LINE_REGEX = /dsh web:\s+(http:\/\/\S+)/
 
+/** Default timeout for waiting on the URL line: 30 s. */
+const DEFAULT_URL_TIMEOUT_MS = 30_000
+
+/** Collected stderr lines for error reporting. */
+const MAX_STDERR_LINES = 50
+
 /**
  * Manages one dsh web child process. The caller starts it with {@link
  * DshProcess.start}, awaits {@link DshProcess.waitForUrl} for the URL line,
@@ -42,29 +55,43 @@ export class DshProcess {
   private child: ChildProcessWithoutNullStreams | undefined
   /** Accumulated stdout text for URL-line parsing. */
   private stdoutText = ''
+  /** Accumulated stderr lines for error diagnostics. */
+  private stderrLines: string[] = []
   private urlResolve: ((info: DshUrlInfo) => void) | undefined
-  private exitReject: ((err: Error) => void) | undefined
+  private urlReject: ((err: Error) => void) | undefined
+  private urlTimer: ReturnType<typeof setTimeout> | undefined
   private readonly logger: (line: string) => void
+  private readonly urlTimeoutMs: number
 
   constructor(private readonly options: DshProcessOptions) {
     this.logger = options.logger ?? (() => {})
+    this.urlTimeoutMs = options.urlTimeoutMs ?? DEFAULT_URL_TIMEOUT_MS
   }
 
   /**
-   * Spawn the dsh web child process.
+   * Spawn the dsh web child process. Sets `ELECTRON_RUN_AS_NODE=1` so the
+   * Electron binary acts as a plain Node.js runtime.
    * @throws if the bin path cannot be resolved.
    */
   start(): void {
     const nodePath = this.options.nodePath ?? process.execPath
     const dshBin = this.options.dshBinPath ?? this.resolveDshBin()
     const args = [dshBin, 'web', '--port', String(this.options.port)]
-    const env = { ...process.env, ...this.options.env }
+    // ELECTRON_RUN_AS_NODE=1 is the critical fix: without it, spawning the
+    // Electron binary launches a new GUI window instead of a Node process.
+    // Spread AFTER caller env so it always wins — a caller must not be able
+    // to accidentally disable Node mode and get a blank Electron window.
+    const env = {
+      ...process.env,
+      ...this.options.env,
+      ELECTRON_RUN_AS_NODE: '1',
+    }
 
     this.child = spawn(nodePath, args, {
       env,
       cwd: this.options.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: false,
+      windowsHide: true,
     })
 
     this.child.stdout.setEncoding('utf8')
@@ -75,19 +102,21 @@ export class DshProcess {
     this.child.on('exit', (code) => {
       this.logger(`dsh: child exited with code ${String(code)}`)
       this.child = undefined
+      if (this.urlTimer !== undefined) { clearTimeout(this.urlTimer); this.urlTimer = undefined }
       if (this.urlResolve !== undefined) {
-        const r = this.urlResolve
+        const r = this.urlReject ?? ((e: Error) => { throw e })
         this.urlResolve = undefined
-        r({ url: '', port: 0 }) // resolve to unblock, caller checks
+        this.urlReject = undefined
+        r(new Error(`dsh-process: child exited before URL line (code ${String(code)})\n${this.getStderr()}`))
       }
     })
   }
 
   /**
-   * Wait for the `dsh web: <url>` line on stdout.
+   * Wait for the `dsh web: <url>` line on stdout, with a timeout.
    * @param signal - optional AbortSignal to cancel the wait.
    * @returns the parsed URL and port.
-   * @throws on abort, or if the child exits before emitting a URL.
+   * @throws on timeout, abort, or if the child exits before emitting a URL.
    */
   async waitForUrl(signal?: AbortSignal): Promise<DshUrlInfo> {
     // Fast path: URL already received.
@@ -100,10 +129,21 @@ export class DshProcess {
         return
       }
       this.urlResolve = resolve
-      this.exitReject = reject
+      this.urlReject = reject
+
+      // Timeout: if no URL line arrives within the configured window, reject.
+      this.urlTimer = setTimeout(() => {
+        if (this.urlResolve !== undefined) {
+          this.urlResolve = undefined
+          this.urlReject = undefined
+          reject(new Error(`dsh-process: no URL line within ${String(this.urlTimeoutMs)} ms\n${this.getStderr()}`))
+        }
+      }, this.urlTimeoutMs)
+
       const onAbort = (): void => {
+        if (this.urlTimer !== undefined) { clearTimeout(this.urlTimer); this.urlTimer = undefined }
         this.urlResolve = undefined
-        this.exitReject = undefined
+        this.urlReject = undefined
         reject(new Error('dsh-process: aborted while waiting for URL line'))
       }
       signal?.addEventListener('abort', onAbort, { once: true })
@@ -114,11 +154,12 @@ export class DshProcess {
    * Gracefully stop the child: send SIGTERM, wait up to 5 s, then SIGKILL.
    */
   async stop(): Promise<void> {
+    if (this.urlTimer !== undefined) { clearTimeout(this.urlTimer); this.urlTimer = undefined }
     const child = this.child
     if (child === undefined) return
     this.child = undefined
     this.urlResolve = undefined
-    this.exitReject = undefined
+    this.urlReject = undefined
 
     await new Promise<void>((resolve) => {
       let settled = false
@@ -144,6 +185,13 @@ export class DshProcess {
     return this.child?.pid
   }
 
+  /** Collect stderr lines for error diagnostics. */
+  private getStderr(): string {
+    return this.stderrLines.length > 0
+      ? `stderr:\n  ${this.stderrLines.join('\n  ')}`
+      : '(no stderr output)'
+  }
+
   /** Resolve the dsh bin path from the installed @deepseek-ai/dsh package. */
   private resolveDshBin(): string {
     const pkg = require.resolve('@deepseek-ai/dsh/package.json')
@@ -166,17 +214,22 @@ export class DshProcess {
     // Check for URL line in the full accumulated stdout.
     const info = this.parseUrlLine(this.stdoutText)
     if (info !== undefined && this.urlResolve !== undefined) {
+      if (this.urlTimer !== undefined) { clearTimeout(this.urlTimer); this.urlTimer = undefined }
       const r = this.urlResolve
       this.urlResolve = undefined
-      this.exitReject = undefined
+      this.urlReject = undefined
       r(info)
     }
   }
 
-  /** Log stderr lines. */
+  /** Log stderr lines and accumulate for error reporting. */
   private onStderr(chunk: string): void {
     for (const line of chunk.split('\n')) {
-      if (line.trim() !== '') this.logger(line)
+      if (line.trim() !== '') {
+        this.logger(line)
+        this.stderrLines.push(line)
+        if (this.stderrLines.length > MAX_STDERR_LINES) this.stderrLines.shift()
+      }
     }
   }
 

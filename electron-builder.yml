@@ -6,6 +6,15 @@ directories:
   output: build/out
   buildResources: build
 
+asar: true
+asarUnpack:
+  - node_modules/**/*.{node,dll}
+  - node_modules/node-pty/**
+  - node_modules/@parcel/watcher/**
+  - node_modules/@deepseek-ai/dsh-subprocess-local/**
+  - node_modules/@deepseek-ai/dsh-web-frontend/dist/**
+  - node_modules/@deepseek-ai/dsh-web-frontend/**
+
 files:
   - dist/**/*
   - node_modules/**/*

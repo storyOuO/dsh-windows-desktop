@@ -102,8 +102,20 @@ describe('DshProcess', () => {
       process.execPath,
       ['/fake/dsh/bin.js', 'web', '--port', '8080'],
       expect.objectContaining({
-        env: expect.objectContaining({}),
+        env: expect.objectContaining({ ELECTRON_RUN_AS_NODE: '1' }),
         stdio: ['pipe', 'pipe', 'pipe'],
+      }),
+    )
+  })
+
+  it('sets ELECTRON_RUN_AS_NODE=1 in the child env', () => {
+    const proc = new DshProcess({ port: 3080, dshBinPath: '/fake/bin.js' })
+    proc.start()
+    expect(mockSpawn).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        env: expect.objectContaining({ ELECTRON_RUN_AS_NODE: '1' }),
       }),
     )
   })
@@ -222,5 +234,32 @@ describe('DshProcess', () => {
     fakeChild.emitData('stdout', '127.0.0.1:3080\n')
     const info = await urlPromise
     expect(info.port).toBe(3080)
+  })
+
+  it('rejects waitForUrl on timeout when no URL line arrives', async () => {
+    const proc = new DshProcess({ port: 3080, dshBinPath: '/fake/bin.js', urlTimeoutMs: 100 })
+    proc.start()
+    await expect(proc.waitForUrl()).rejects.toThrow(/no URL line within/)
+  })
+
+  it('rejects waitForUrl when child exits before URL line', async () => {
+    const proc = new DshProcess({ port: 3080, dshBinPath: '/fake/bin.js' })
+    proc.start()
+    const urlPromise = proc.waitForUrl()
+    fakeChild.emitExit(1)
+    await expect(urlPromise).rejects.toThrow(/child exited before URL line/)
+  })
+
+  it('custom env vars do not override ELECTRON_RUN_AS_NODE', () => {
+    const proc = new DshProcess({
+      port: 3080,
+      dshBinPath: '/fake/bin.js',
+      env: { ELECTRON_RUN_AS_NODE: '0', CUSTOM: 'val' },
+    })
+    proc.start()
+    const callEnv = mockSpawn.mock.calls[0][2].env
+    // ELECTRON_RUN_AS_NODE must always be '1', even if caller tries to override.
+    expect(callEnv.ELECTRON_RUN_AS_NODE).toBe('1')
+    expect(callEnv.CUSTOM).toBe('val')
   })
 })
