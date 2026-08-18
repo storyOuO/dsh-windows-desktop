@@ -1,7 +1,6 @@
 appId: com.deepseek.dsh-windows-desktop
 productName: DeepSeek Harness
 copyright: Copyright © 2026
-author: jijiayue03
 
 directories:
   output: build/out
