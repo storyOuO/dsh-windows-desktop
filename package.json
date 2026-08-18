@@ -31,5 +31,13 @@
   },
   "dependencies": {
     "@deepseek-ai/dsh": "^0.1.0-rc.7"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "electron-builder",
+      "esbuild",
+      "@parcel/watcher"
+    ]
   }
 }

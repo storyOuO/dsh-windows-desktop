@@ -14,7 +14,7 @@ jobs:
         with:
           node-version: '22'
       - run: npm install -g pnpm@11
-      - run: pnpm install --no-frozen-lockfile --config.node-linker=hoisted --config.shamefully-hoist=true
+      - run: pnpm install --no-frozen-lockfile --config.node-linker=hoisted --config.shamefully-hoist=true --config.dangerouslyAllowAllBuilds=true
       - run: pnpm run build
       - run: npx electron-builder --win
         env:
