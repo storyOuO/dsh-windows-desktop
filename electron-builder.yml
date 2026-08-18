@@ -1,0 +1,36 @@
+appId: com.deepseek.dsh-windows-desktop
+productName: DeepSeek Harness
+copyright: Copyright © 2026
+author: jijiayue03
+
+directories:
+  output: build/out
+  buildResources: build
+
+files:
+  - dist/**/*
+  - node_modules/**/*
+  - build/icon.ico
+  - package.json
+
+win:
+  target:
+    - nsis
+    - portable
+  icon: build/icon.ico
+  artifactName: dsh-windows-desktop-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  shortcutName: DeepSeek Harness
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  artifactName: dsh-windows-desktop-${version}-setup.${ext}
+
+portable:
+  artifactName: dsh-windows-desktop-${version}-portable.${ext}

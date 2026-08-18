@@ -1,0 +1,35 @@
+{
+  "name": "dsh-windows-desktop",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness Windows desktop client — Electron wrapper around dsh web",
+  "license": "MIT",
+  "author": "jijiayue03 <jijiayue03@kuaishou.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jijiayue03/dsh-windows-desktop.git"
+  },
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc && electron .",
+    "start": "electron .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "tsc --noEmit",
+    "pack": "tsc && electron-builder --win",
+    "pack:portable": "tsc && electron-builder --win portable",
+    "pack:dir": "tsc && electron-builder --win --dir"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "@vitest/coverage-v8": "^4.1.8",
+    "electron": "^34.0.0",
+    "electron-builder": "^26.0.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh": "^0.1.0-rc.7"
+  }
+}
