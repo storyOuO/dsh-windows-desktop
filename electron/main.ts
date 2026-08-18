@@ -149,7 +149,13 @@ async function bootstrap(): Promise<void> {
 
   const port = await getFreePort()
   const apiKey = apiKeyStore.getApiKey()
-  const env: NodeJS.ProcessEnv = {}
+  // Keep dsh's profile and plugin state inside this app's user-data directory.
+  // In particular, do not inherit DSH_HOME from the parent process: a stale or
+  // partially installed global profile can make the backend fail before it
+  // starts (for example, when it references a plugin package that is absent).
+  const env: NodeJS.ProcessEnv = {
+    DSH_HOME: join(app.getPath('userData'), 'dsh'),
+  }
   if (apiKey !== undefined) env.DEEPSEEK_API_KEY = apiKey
 
   dshProcess = new DshProcess({ port, env, logger: (line) => console.log(line) })
