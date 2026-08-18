@@ -24,8 +24,8 @@ const WINDOW_HEIGHT = 800
 const MIN_WIDTH = 800
 const MIN_HEIGHT = 600
 
-/** Timeout for the entire bootstrap (dsh start + URL + HTTP ready): 45 s. */
-const BOOTSTRAP_TIMEOUT_MS = 45_000
+/** Timeout for the entire bootstrap (dsh start + URL + HTTP ready): 120 s — Cordis plugin tree with 50+ plugins can be slow on Windows. */
+const BOOTSTRAP_TIMEOUT_MS = 120_000
 
 let dshProcess: DshProcess | undefined
 let trayManager: TrayManager | undefined
@@ -193,7 +193,7 @@ async function bootstrap(): Promise<void> {
 
   // Wait for HTTP readiness (the URL line means the server is listening).
   try {
-    await waitForReady({ url, timeoutMs: 15_000, signal: timeoutController.signal })
+    await waitForReady({ url, timeoutMs: 90_000, signal: timeoutController.signal })
   } catch (err) {
     clearTimeout(bootstrapTimer)
     const msg = err instanceof Error ? err.message : String(err)

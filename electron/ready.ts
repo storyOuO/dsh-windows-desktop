@@ -2,6 +2,10 @@
  * HTTP readiness probe: poll a URL until it responds 200 or the timeout
  * expires. Used to wait for the dsh web server to finish booting before
  * loading the BrowserWindow.
+ *
+ * During Cordis plugin initialization, the web server returns 404 for
+ * unmatched routes (the SPA fallback seat has not been claimed yet). This
+ * is expected — the probe treats 404 as "still booting" and keeps polling.
  * @module electron/ready
  */
 
@@ -19,11 +23,11 @@ export interface WaitForReadyOptions {
   signal?: AbortSignal
 }
 
-/** Default total timeout: 30 s. */
-const DEFAULT_TIMEOUT_MS = 30_000
+/** Default total timeout: 90 s — Cordis plugin tree with 50+ plugins can be slow on Windows. */
+const DEFAULT_TIMEOUT_MS = 90_000
 
-/** Default polling interval: 200 ms. */
-const DEFAULT_INTERVAL_MS = 200
+/** Default polling interval: 500 ms — generous to avoid spamming the server during boot. */
+const DEFAULT_INTERVAL_MS = 500
 
 /**
  * Probe a URL with a short GET and resolve when the first 200 arrives.
@@ -32,7 +36,7 @@ const DEFAULT_INTERVAL_MS = 200
  */
 function probe(url: string): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
-    const req = request(url, { method: 'GET', timeout: 2000 }, (res) => {
+    const req = request(url, { method: 'GET', timeout: 3000 }, (res) => {
       res.resume()
       resolve(res.statusCode === 200)
     })
