@@ -1,6 +1,6 @@
 {
   "name": "dsh-windows-desktop",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "DeepSeek Harness Windows desktop client — Electron wrapper around dsh web",
   "license": "MIT",
   "author": "jijiayue03 <jijiayue03@kuaishou.com>",

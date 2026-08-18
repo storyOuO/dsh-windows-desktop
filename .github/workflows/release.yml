@@ -27,4 +27,4 @@ jobs:
           files: |
             build/out/dsh-windows-desktop-*-setup.exe
             build/out/dsh-windows-desktop-*-portable.exe
-          draft: true
+          draft: false
