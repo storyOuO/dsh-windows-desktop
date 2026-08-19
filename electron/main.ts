@@ -7,7 +7,7 @@
  */
 
 import { app, BrowserWindow, ipcMain, shell, nativeImage, Tray, Menu, safeStorage, dialog } from 'electron'
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, appendFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { getFreePort } from './port'
 import { waitForReady } from './ready'
@@ -27,9 +27,37 @@ const MIN_HEIGHT = 600
 /** Timeout for the entire bootstrap (dsh start + URL + HTTP ready): 120 s — Cordis plugin tree with 50+ plugins can be slow on Windows. */
 const BOOTSTRAP_TIMEOUT_MS = 120_000
 
+/** Force-show the window after this long even if ready-to-show never fires (GPU/compositor quirks on some Windows machines). */
+const FORCE_SHOW_MS = 10_000
+
 let dshProcess: DshProcess | undefined
 let trayManager: TrayManager | undefined
 let apiKeyStore: ApiKeyStore | undefined
+
+/** Path of the main-process log file; set once userData is available. */
+let mainLogPath: string | undefined
+
+/** Append one line to the main-process log (best-effort; never throws). */
+function logMain(line: string): void {
+  if (mainLogPath === undefined) return
+  try { appendFileSync(mainLogPath, `${line}\n`) } catch { /* disk full/permissions — logging must never crash the app */ }
+}
+
+/**
+ * Initialize the main-process log. The packaged Windows app has no console,
+ * so main-process errors and the bootstrap timeline otherwise vanish.
+ * Called as the first step of bootstrap().
+ */
+function initMainLog(): void {
+  mainLogPath = join(app.getPath('userData'), 'main.log')
+  try { writeFileSync(mainLogPath, `--- launch ${new Date().toISOString()} ---\n`) } catch { /* non-fatal */ }
+  // Mirror console.error into the log from now on.
+  const originalError = console.error
+  console.error = (...args: unknown[]): void => {
+    originalError(...args)
+    logMain(`[error] ${args.map(a => a instanceof Error ? `${a.name}: ${a.message}\n${a.stack ?? ''}` : String(a)).join(' ')}`)
+  }
+}
 
 /**
  * Create the main BrowserWindow and return it.
@@ -51,8 +79,25 @@ function createWindow(url: string): BrowserWindow {
     },
   })
 
-  win.once('ready-to-show', () => win.show())
-  win.loadURL(url)
+  win.once('ready-to-show', () => {
+    logMain('window: ready-to-show fired, showing window')
+    win.show()
+  })
+  // Fallback: some Windows GPU/compositor configurations never emit
+  // ready-to-show, which would leave the app as a silent background process.
+  // Force-show so the user at least sees the window state.
+  setTimeout(() => {
+    if (!win.isDestroyed() && !win.isVisible()) {
+      logMain('window: ready-to-show did not fire within 10 s, force-showing')
+      win.show()
+    }
+  }, FORCE_SHOW_MS)
+  win.webContents.on('did-fail-load', (_event, code, description, failedUrl) => {
+    logMain(`window: did-fail-load code=${String(code)} desc=${description} url=${failedUrl}`)
+  })
+  win.loadURL(url).catch((err: unknown) => {
+    logMain(`window: loadURL rejected: ${err instanceof Error ? err.message : String(err)}`)
+  })
   return win
 }
 
@@ -141,6 +186,9 @@ function fatalDialog(title: string, message: string): void {
  * from hanging indefinitely if the dsh backend fails to start.
  */
 async function bootstrap(): Promise<void> {
+  initMainLog()
+  logMain('bootstrap: starting')
+
   apiKeyStore = new ApiKeyStore(
     app,
     safeStorage,
@@ -153,6 +201,7 @@ async function bootstrap(): Promise<void> {
   setupIpc()
 
   const port = await getFreePort()
+  logMain(`bootstrap: port allocated (${String(port)})`)
   const apiKey = apiKeyStore.getApiKey()
   // Keep dsh's profile and plugin state inside this app's user-data directory.
   // In particular, do not inherit DSH_HOME from the parent process: a stale or
@@ -170,6 +219,7 @@ async function bootstrap(): Promise<void> {
 
   dshProcess = new DshProcess({ port, env, logFile: backendLog, logger: (line) => console.log(line) })
   dshProcess.start()
+  logMain(`bootstrap: backend spawned (pid ${String(dshProcess.pid)})`)
 
   // Overall bootstrap timeout: if dsh doesn't come up within the window,
   // show an error dialog instead of hanging with a blank window.
@@ -200,6 +250,7 @@ async function bootstrap(): Promise<void> {
   }
 
   const url = `http://127.0.0.1:${String(urlInfo.port)}`
+  logMain(`bootstrap: backend URL received (${url})`)
 
   // Wait for HTTP readiness (the URL line means the server is listening).
   try {
@@ -215,6 +266,7 @@ async function bootstrap(): Promise<void> {
   }
 
   clearTimeout(bootstrapTimer)
+  logMain('bootstrap: HTTP ready, creating window')
 
   const win = createWindow(url)
 
@@ -230,9 +282,24 @@ async function bootstrap(): Promise<void> {
     win,
   )
   trayManager.create()
+  logMain('bootstrap: complete')
 }
 
 // Electron lifecycle wiring.
+
+// Crash visibility: without these, an uncaught error in the main process
+// kills it silently on packaged Windows (no console, no dialog) — the app
+// just becomes a background process that never shows a window.
+process.on('uncaughtException', (err) => {
+  logMain(`uncaughtException: ${err.stack ?? err.message}`)
+  try {
+    dialog.showErrorBox('DeepSeek Harness — Unexpected Error', `${err.stack ?? err.message}`)
+  } catch { /* dialog may be unavailable during teardown */ }
+  app.exit(1)
+})
+process.on('unhandledRejection', (reason) => {
+  logMain(`unhandledRejection: ${String(reason)}`)
+})
 
 // Prevent multiple instances.
 const gotLock = app.requestSingleInstanceLock()
@@ -240,6 +307,7 @@ if (!gotLock) {
   app.quit()
 } else {
   app.on('second-instance', () => {
+    logMain('lifecycle: second-instance signaled')
     const win = BrowserWindow.getAllWindows()[0]
     if (win !== undefined) {
       if (win.isMinimized()) win.restore()
