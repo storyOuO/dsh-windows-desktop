@@ -26,11 +26,11 @@ export interface WaitForReadyOptions {
   signal?: AbortSignal
 }
 
-/** Default total timeout: 90 s — the Cordis plugin tree (50+ plugins) can be slow to settle on Windows. */
-const DEFAULT_TIMEOUT_MS = 90_000
+/** Default total timeout: 30 s. */
+const DEFAULT_TIMEOUT_MS = 30_000
 
-/** Default polling interval: 500 ms — generous to avoid spamming the server during boot. */
-const DEFAULT_INTERVAL_MS = 500
+/** Default polling interval: 200 ms. */
+const DEFAULT_INTERVAL_MS = 200
 
 /** Outcome of one probe: either an HTTP status code or a connection-level failure. */
 type ProbeResult = { kind: 'status', code: number } | { kind: 'error', message: string }
@@ -42,7 +42,7 @@ type ProbeResult = { kind: 'status', code: number } | { kind: 'error', message: 
  */
 function probe(url: string): Promise<ProbeResult> {
   return new Promise<ProbeResult>((resolve) => {
-    const req = request(url, { method: 'GET', timeout: 3000 }, (res) => {
+    const req = request(url, { method: 'GET', timeout: 2000 }, (res) => {
       res.resume()
       resolve({ kind: 'status', code: res.statusCode ?? 0 })
     })

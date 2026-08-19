@@ -1,8 +1,10 @@
 /**
- * Electron main process entry: orchestrates the dsh web child process, the
- * BrowserWindow, the system tray, and the API-key IPC bridge. This is the
- * only module that imports 'electron' directly; all others take injected
- * dependencies for testability.
+ * Electron main process entry: opens the shell window immediately (loading
+ * page), then asynchronously boots the dsh web backend. Success swaps the
+ * page for the dsh web UI; failure renders the reason inside the window
+ * with a retry button. Also owns the system tray and the API-key IPC bridge.
+ * This is the only module that imports 'electron' directly; all others take
+ * injected dependencies for testability.
  * @module electron/main
  */
 
@@ -14,6 +16,7 @@ import { waitForReady } from './ready'
 import { DshProcess } from './dsh-process'
 import { ApiKeyStore } from './api-key'
 import { TrayManager } from './tray'
+import { shellPageUrl, type BootstrapStatus } from './pages'
 import { IpcChannel, type IpcResponse } from './ipc-types'
 
 /** Default window dimensions. */
@@ -24,16 +27,18 @@ const WINDOW_HEIGHT = 800
 const MIN_WIDTH = 800
 const MIN_HEIGHT = 600
 
-/** Timeout for the entire bootstrap (dsh start + URL + HTTP ready): 120 s — Cordis plugin tree with 50+ plugins can be slow on Windows. */
-const BOOTSTRAP_TIMEOUT_MS = 120_000
+/** Timeout for the entire bootstrap (dsh start + URL + HTTP ready). */
+const BOOTSTRAP_TIMEOUT_MS = 45_000
 
-/** Force-show the window after this long even if ready-to-show never fires (GPU/compositor quirks on some Windows machines). */
-const FORCE_SHOW_MS = 10_000
+/** Timeout for the HTTP-ready probe after the URL line is seen. The backend
+ * binds its port before printing the URL; 15 s covers plugin-tree init. */
+const HTTP_READY_TIMEOUT_MS = 15_000
 
 let dshProcess: DshProcess | undefined
 let trayManager: TrayManager | undefined
 let apiKeyStore: ApiKeyStore | undefined
-
+/** The single shell window; created on launch and reused across retries. */
+let shellWindow: BrowserWindow | undefined
 /** Path of the main-process log file; set once userData is available. */
 let mainLogPath: string | undefined
 
@@ -46,7 +51,6 @@ function logMain(line: string): void {
 /**
  * Initialize the main-process log. The packaged Windows app has no console,
  * so main-process errors and the bootstrap timeline otherwise vanish.
- * Called as the first step of bootstrap().
  */
 function initMainLog(): void {
   mainLogPath = join(app.getPath('userData'), 'main.log')
@@ -60,16 +64,17 @@ function initMainLog(): void {
 }
 
 /**
- * Create the main BrowserWindow and return it.
- * @param url - the URL to load (dsh web).
+ * Create the shell window showing the bootstrap loading page. Shown
+ * immediately (no ready-to-show gating) so double-click feedback is
+ * instant while the backend boots in the background.
  */
-function createWindow(url: string): BrowserWindow {
+function createShellWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: WINDOW_WIDTH,
     height: WINDOW_HEIGHT,
     minWidth: MIN_WIDTH,
     minHeight: MIN_HEIGHT,
-    show: false,
+    show: true,
     icon: getIconPath(),
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
@@ -78,27 +83,20 @@ function createWindow(url: string): BrowserWindow {
       sandbox: true,
     },
   })
-
-  win.once('ready-to-show', () => {
-    logMain('window: ready-to-show fired, showing window')
-    win.show()
-  })
-  // Fallback: some Windows GPU/compositor configurations never emit
-  // ready-to-show, which would leave the app as a silent background process.
-  // Force-show so the user at least sees the window state.
-  setTimeout(() => {
-    if (!win.isDestroyed() && !win.isVisible()) {
-      logMain('window: ready-to-show did not fire within 10 s, force-showing')
-      win.show()
-    }
-  }, FORCE_SHOW_MS)
   win.webContents.on('did-fail-load', (_event, code, description, failedUrl) => {
     logMain(`window: did-fail-load code=${String(code)} desc=${description} url=${failedUrl}`)
   })
-  win.loadURL(url).catch((err: unknown) => {
+  void win.loadURL(shellPageUrl()).catch((err: unknown) => {
     logMain(`window: loadURL rejected: ${err instanceof Error ? err.message : String(err)}`)
   })
   return win
+}
+
+/** Push a bootstrap status update to the shell page (no-op without a page). */
+function sendBootstrapStatus(status: BootstrapStatus): void {
+  if (shellWindow !== undefined && !shellWindow.isDestroyed()) {
+    shellWindow.webContents.send(IpcChannel.BootstrapStatus, status)
+  }
 }
 
 /** Resolve the app icon path (bundled or dev). */
@@ -115,7 +113,7 @@ function createTrayIcon(): string {
   return existsSync(iconPath) ? iconPath : join(__dirname, '..', 'build', 'icon.ico')
 }
 
-/** Wire the API-key IPC handlers. */
+/** Wire the API-key and bootstrap IPC handlers. */
 function setupIpc(): void {
   if (apiKeyStore === undefined) throw new Error('main: apiKeyStore not initialized')
 
@@ -153,9 +151,18 @@ function setupIpc(): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
+
+  ipcMain.handle(IpcChannel.RetryBootstrap, async (): Promise<IpcResponse<void>> => {
+    try {
+      await startBackendAndConnect()
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
 }
 
-/** Clean up all resources before quit. */
+/** Clean up backend and tray resources before quit or retry. */
 async function cleanup(): Promise<void> {
   trayManager?.destroy()
   trayManager = undefined
@@ -164,45 +171,18 @@ async function cleanup(): Promise<void> {
 }
 
 /**
- * Show a fatal error dialog and quit. Used when the dsh backend fails to
- * start — the user sees a clear message instead of a blank white window.
- * When a dsh child process exists, its recent output tail is appended so
- * the dialog carries the backend's actual failure reason (the packaged
- * Windows app has no console to see it in).
- * @param title - dialog title.
- * @param message - error details.
+ * Boot the dsh backend and connect the shell window to it. Runs
+ * asynchronously after the window opens; every failure path reports the
+ * reason to the window (not a system dialog) so the user can read it and
+ * retry. Never throws to the caller — failures render in-page.
  */
-function fatalDialog(title: string, message: string): void {
-  const tail = dshProcess?.getRecentOutput() ?? '(backend not started)'
-  const full = `${message}\n\n--- backend output (tail) ---\n${tail}`
-  console.error(`${title}: ${full}`)
-  dialog.showErrorBox(title, full)
-  void cleanup().then(() => app.quit())
-}
-
-/**
- * App entry: allocate a port, start dsh, wait for it, show the window.
- * Runs after Electron's `ready` event. A bootstrap timeout prevents the app
- * from hanging indefinitely if the dsh backend fails to start.
- */
-async function bootstrap(): Promise<void> {
-  initMainLog()
+async function startBackendAndConnect(): Promise<void> {
+  sendBootstrapStatus({ phase: 'loading' })
   logMain('bootstrap: starting')
-
-  apiKeyStore = new ApiKeyStore(
-    app,
-    safeStorage,
-    readFileSync,
-    writeFileSync,
-    existsSync,
-    join,
-  )
-
-  setupIpc()
 
   const port = await getFreePort()
   logMain(`bootstrap: port allocated (${String(port)})`)
-  const apiKey = apiKeyStore.getApiKey()
+  const apiKey = apiKeyStore?.getApiKey()
   // Keep dsh's profile and plugin state inside this app's user-data directory.
   // In particular, do not inherit DSH_HOME from the parent process: a stale or
   // partially installed global profile can make the backend fail before it
@@ -221,30 +201,34 @@ async function bootstrap(): Promise<void> {
   dshProcess.start()
   logMain(`bootstrap: backend spawned (pid ${String(dshProcess.pid)})`)
 
-  // Overall bootstrap timeout: if dsh doesn't come up within the window,
-  // show an error dialog instead of hanging with a blank window.
+  // Overall bootstrap timeout: abort the waits if dsh doesn't come up.
   const timeoutController = new AbortController()
   const bootstrapTimer = setTimeout(() => timeoutController.abort(), BOOTSTRAP_TIMEOUT_MS)
+
+  /** Report an in-page failure and stop the backend. */
+  const fail = (message: string, detail: string): void => {
+    clearTimeout(bootstrapTimer)
+    logMain(`bootstrap: failed — ${message}`)
+    sendBootstrapStatus({ phase: 'error', message, detail })
+    void dshProcess?.stop().then(() => { dshProcess = undefined })
+  }
 
   let urlInfo
   try {
     urlInfo = await dshProcess.waitForUrl(timeoutController.signal)
   } catch (err) {
-    clearTimeout(bootstrapTimer)
-    const msg = err instanceof Error ? err.message : String(err)
-    fatalDialog(
-      'DeepSeek Harness — Backend Failed to Start',
-      `The dsh web backend did not start within ${String(BOOTSTRAP_TIMEOUT_MS / 1000)} seconds.\n\n${msg}`,
+    fail(
+      '后台服务启动失败',
+      `${err instanceof Error ? err.message : String(err)}\n\n--- backend output (tail) ---\n${dshProcess?.getRecentOutput() ?? '(no output)'}`,
     )
     return
   }
 
-  // If the child exited immediately and returned an empty URL, treat as failure.
+  // The child exits with an empty URL when it dies before binding.
   if (urlInfo.port === 0) {
-    clearTimeout(bootstrapTimer)
-    fatalDialog(
-      'DeepSeek Harness — Backend Failed to Start',
-      'The dsh web backend exited before it was ready. Check the application logs for details.',
+    fail(
+      '后台服务启动失败',
+      `The dsh web backend exited before it was ready.\n\n--- backend output (tail) ---\n${dshProcess?.getRecentOutput() ?? '(no output)'}`,
     )
     return
   }
@@ -252,23 +236,44 @@ async function bootstrap(): Promise<void> {
   const url = `http://127.0.0.1:${String(urlInfo.port)}`
   logMain(`bootstrap: backend URL received (${url})`)
 
-  // Wait for HTTP readiness (the URL line means the server is listening).
   try {
-    await waitForReady({ url, timeoutMs: 90_000, signal: timeoutController.signal })
+    await waitForReady({ url, timeoutMs: HTTP_READY_TIMEOUT_MS, signal: timeoutController.signal })
   } catch (err) {
-    clearTimeout(bootstrapTimer)
-    const msg = err instanceof Error ? err.message : String(err)
-    fatalDialog(
-      'DeepSeek Harness — Backend Not Ready',
-      `The dsh web backend started but did not respond to HTTP.\n\n${msg}`,
+    fail(
+      '后台服务未就绪',
+      `${err instanceof Error ? err.message : String(err)}\n\n--- backend output (tail) ---\n${dshProcess?.getRecentOutput() ?? '(no output)'}`,
     )
     return
   }
 
   clearTimeout(bootstrapTimer)
-  logMain('bootstrap: HTTP ready, creating window')
+  logMain('bootstrap: HTTP ready, loading dsh web UI')
 
-  const win = createWindow(url)
+  if (shellWindow !== undefined && !shellWindow.isDestroyed()) {
+    await shellWindow.loadURL(url)
+  }
+  logMain('bootstrap: complete')
+}
+
+/**
+ * One-time app initialization: logging, API-key store, IPC, tray, and the
+ * shell window; then the first backend boot runs in the background.
+ */
+async function bootstrap(): Promise<void> {
+  initMainLog()
+
+  apiKeyStore = new ApiKeyStore(
+    app,
+    safeStorage,
+    readFileSync,
+    writeFileSync,
+    existsSync,
+    join,
+  )
+
+  setupIpc()
+
+  shellWindow = createShellWindow()
 
   trayManager = new TrayManager(
     {
@@ -279,10 +284,11 @@ async function bootstrap(): Promise<void> {
         try { return nativeImage.createFromPath(iconPath) } catch { return iconPath }
       },
     },
-    win,
+    shellWindow,
   )
   trayManager.create()
-  logMain('bootstrap: complete')
+
+  await startBackendAndConnect()
 }
 
 // Electron lifecycle wiring.
@@ -318,8 +324,12 @@ if (!gotLock) {
 
   app.whenReady().then(() => {
     void bootstrap().catch((err) => {
-      const msg = err instanceof Error ? err.message : String(err)
-      fatalDialog('DeepSeek Harness — Startup Error', msg)
+      logMain(`bootstrap: unexpected error — ${err instanceof Error ? err.stack ?? err.message : String(err)}`)
+      sendBootstrapStatus({
+        phase: 'error',
+        message: '应用初始化失败',
+        detail: String(err),
+      })
     })
   })
 
@@ -328,15 +338,6 @@ if (!gotLock) {
     // platforms the app should quit and take the dsh child with it.
     if (process.platform !== 'darwin') {
       void cleanup().then(() => app.quit())
-    }
-  })
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      void bootstrap().catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err)
-        fatalDialog('DeepSeek Harness — Startup Error', msg)
-      })
     }
   })
 

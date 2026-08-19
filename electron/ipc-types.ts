@@ -9,6 +9,8 @@ export const IpcChannel = {
   SetApiKey: 'api-key:set',
   DeleteApiKey: 'api-key:delete',
   OpenExternal: 'open-external',
+  RetryBootstrap: 'bootstrap:retry',
+  BootstrapStatus: 'bootstrap:status',
 } as const
 
 export type IpcChannel = typeof IpcChannel[keyof typeof IpcChannel]
