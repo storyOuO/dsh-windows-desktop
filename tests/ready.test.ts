@@ -28,8 +28,26 @@ describe('waitForReady', () => {
     const start = Date.now()
     await expect(
       waitForReady({ url: 'http://127.0.0.1:59998', timeoutMs: 500, intervalMs: 100 }),
-    ).rejects.toThrow(/did not respond within/)
+    ).rejects.toThrow(/did not respond with HTTP 200 within .* \(observed: ECONNREFUSED x/)
     expect(Date.now() - start).toBeGreaterThanOrEqual(400)
+  })
+
+  it('timeout error includes the observed status-code summary', async () => {
+    // A server that always answers 404 (dsh boot window before the SPA
+    // fallback is registered) must surface as `HTTP 404 x<n>` in the error.
+    server = createServer((req, res) => { res.writeHead(404); res.end() })
+    const port404 = await new Promise<number>((resolve) => {
+      server!.listen(0, '127.0.0.1', () => {
+        resolve((server!.address() as { port: number }).port)
+      })
+    })
+    const err = await waitForReady({
+      url: `http://127.0.0.1:${String(port404)}`,
+      timeoutMs: 400,
+      intervalMs: 50,
+    }).catch((e: Error) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect((err as Error).message).toMatch(/observed: HTTP 404 x/)
   })
 
   it('rejects on AbortSignal cancellation', async () => {

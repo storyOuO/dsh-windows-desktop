@@ -11,6 +11,7 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { appendFileSync } from 'node:fs'
 
 /** Options for {@link DshProcess}. */
 export interface DshProcessOptions {
@@ -28,6 +29,13 @@ export interface DshProcessOptions {
   logger?: (line: string) => void
   /** Timeout in ms for waitForUrl; defaults to 30 s. */
   urlTimeoutMs?: number
+  /**
+   * Append every stdout/stderr line to this file. The packaged Windows app
+   * has no console, so without a log file the dsh backend's output (boot
+   * progress, Cordis fiber failures) is invisible when diagnosing startup
+   * problems.
+   */
+  logFile?: string
 }
 
 /** Parsed URL line emitted by dsh web. */
@@ -57,6 +65,8 @@ export class DshProcess {
   private stdoutText = ''
   /** Accumulated stderr lines for error diagnostics. */
   private stderrLines: string[] = []
+  /** All stdout/stderr lines in order, for the error-dialog tail. */
+  private outputLines: string[] = []
   private urlResolve: ((info: DshUrlInfo) => void) | undefined
   private urlReject: ((err: Error) => void) | undefined
   private urlTimer: ReturnType<typeof setTimeout> | undefined
@@ -66,6 +76,25 @@ export class DshProcess {
   constructor(private readonly options: DshProcessOptions) {
     this.logger = options.logger ?? (() => {})
     this.urlTimeoutMs = options.urlTimeoutMs ?? DEFAULT_URL_TIMEOUT_MS
+  }
+
+  /** Emit one output line to the logger and, when configured, the log file. */
+  private emitLine(line: string): void {
+    this.logger(line)
+    if (this.options.logFile !== undefined) {
+      try { appendFileSync(this.options.logFile, `${line}\n`) } catch { /* disk full/permissions — logging must never crash the app */ }
+    }
+  }
+
+  /**
+   * The last lines of the child's combined output, for error dialogs.
+   * @param maxLines - maximum number of trailing lines to include.
+   * @returns the recent output tail, or a placeholder when silent.
+   */
+  getRecentOutput(maxLines = 30): string {
+    const lines = this.outputLines
+    if (lines.length === 0) return '(no backend output)'
+    return lines.slice(-maxLines).join('\n')
   }
 
   /**
@@ -98,9 +127,9 @@ export class DshProcess {
     this.child.stderr.setEncoding('utf8')
     this.child.stdout.on('data', (chunk: string) => this.onStdout(chunk))
     this.child.stderr.on('data', (chunk: string) => this.onStderr(chunk))
-    this.child.on('error', (err) => this.logger(`dsh: child error: ${err.message}`))
+    this.child.on('error', (err) => this.emitLine(`dsh: child error: ${err.message}`))
     this.child.on('exit', (code) => {
-      this.logger(`dsh: child exited with code ${String(code)}`)
+      this.emitLine(`dsh: child exited with code ${String(code)}`)
       this.child = undefined
       if (this.urlTimer !== undefined) { clearTimeout(this.urlTimer); this.urlTimer = undefined }
       if (this.urlResolve !== undefined) {
@@ -209,7 +238,11 @@ export class DshProcess {
     this.stdoutText += chunk
     // Log complete lines.
     for (const line of chunk.split('\n')) {
-      if (line.trim() !== '') this.logger(line)
+      if (line.trim() !== '') {
+        this.emitLine(line)
+        this.outputLines.push(line)
+        if (this.outputLines.length > 200) this.outputLines.shift()
+      }
     }
     // Check for URL line in the full accumulated stdout.
     const info = this.parseUrlLine(this.stdoutText)
@@ -226,7 +259,9 @@ export class DshProcess {
   private onStderr(chunk: string): void {
     for (const line of chunk.split('\n')) {
       if (line.trim() !== '') {
-        this.logger(line)
+        this.emitLine(line)
+        this.outputLines.push(line)
+        if (this.outputLines.length > 200) this.outputLines.shift()
         this.stderrLines.push(line)
         if (this.stderrLines.length > MAX_STDERR_LINES) this.stderrLines.shift()
       }

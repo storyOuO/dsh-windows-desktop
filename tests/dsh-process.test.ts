@@ -2,6 +2,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { DshProcess, URL_LINE_REGEX } from '../electron/dsh-process'
 import type { DshUrlInfo } from '../electron/dsh-process'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 /** Use vi.hoisted so the mock variable is available when vi.mock factory runs. */
 const { mockSpawn } = vi.hoisted(() => ({ mockSpawn: vi.fn() }))
@@ -261,5 +264,42 @@ describe('DshProcess', () => {
     // ELECTRON_RUN_AS_NODE must always be '1', even if caller tries to override.
     expect(callEnv.ELECTRON_RUN_AS_NODE).toBe('1')
     expect(callEnv.CUSTOM).toBe('val')
+  })
+
+  it('getRecentOutput returns the trailing output lines', () => {
+    const proc = new DshProcess({ port: 3080, dshBinPath: '/fake/bin.js' })
+    proc.start()
+    fakeChild.emitData('stdout', 'line-1\nline-2\n')
+    fakeChild.emitData('stderr', 'line-3\n')
+    const recent = proc.getRecentOutput()
+    expect(recent).toContain('line-1')
+    expect(recent).toContain('line-2')
+    expect(recent).toContain('line-3')
+  })
+
+  it('getRecentOutput caps the tail length', () => {
+    const proc = new DshProcess({ port: 3080, dshBinPath: '/fake/bin.js' })
+    proc.start()
+    for (let i = 0; i < 60; i++) fakeChild.emitData('stdout', `line-${String(i)}\n`)
+    const recent = proc.getRecentOutput(10)
+    const lines = recent.split('\n')
+    expect(lines.length).toBeLessThanOrEqual(10)
+    expect(recent).toContain('line-59')
+    expect(recent).not.toContain('line-0\n')
+  })
+
+  it('getRecentOutput reports silence when no output arrived', () => {
+    const proc = new DshProcess({ port: 3080, dshBinPath: '/fake/bin.js' })
+    expect(proc.getRecentOutput()).toBe('(no backend output)')
+  })
+
+  it('appends output lines to logFile when configured', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-log-'))
+    const logFile = join(dir, 'backend.log')
+    const proc = new DshProcess({ port: 3080, dshBinPath: '/fake/bin.js', logFile })
+    proc.start()
+    fakeChild.emitData('stdout', 'hello-from-dsh\n')
+    expect(readFileSync(logFile, 'utf8')).toContain('hello-from-dsh')
+    rmSync(dir, { recursive: true, force: true })
   })
 })

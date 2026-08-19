@@ -121,12 +121,17 @@ async function cleanup(): Promise<void> {
 /**
  * Show a fatal error dialog and quit. Used when the dsh backend fails to
  * start — the user sees a clear message instead of a blank white window.
+ * When a dsh child process exists, its recent output tail is appended so
+ * the dialog carries the backend's actual failure reason (the packaged
+ * Windows app has no console to see it in).
  * @param title - dialog title.
  * @param message - error details.
  */
 function fatalDialog(title: string, message: string): void {
-  console.error(`${title}: ${message}`)
-  dialog.showErrorBox(title, message)
+  const tail = dshProcess?.getRecentOutput() ?? '(backend not started)'
+  const full = `${message}\n\n--- backend output (tail) ---\n${tail}`
+  console.error(`${title}: ${full}`)
+  dialog.showErrorBox(title, full)
   void cleanup().then(() => app.quit())
 }
 
@@ -158,7 +163,12 @@ async function bootstrap(): Promise<void> {
   }
   if (apiKey !== undefined) env.DEEPSEEK_API_KEY = apiKey
 
-  dshProcess = new DshProcess({ port, env, logger: (line) => console.log(line) })
+  // Backend log file: the packaged Windows app has no console, so persist the
+  // dsh child's output for post-mortem diagnosis. Truncated per launch.
+  const backendLog = join(app.getPath('userData'), 'dsh-backend.log')
+  try { writeFileSync(backendLog, `--- launch ${new Date().toISOString()} ---\n`) } catch { /* non-fatal */ }
+
+  dshProcess = new DshProcess({ port, env, logFile: backendLog, logger: (line) => console.log(line) })
   dshProcess.start()
 
   // Overall bootstrap timeout: if dsh doesn't come up within the window,

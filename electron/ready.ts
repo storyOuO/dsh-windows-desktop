@@ -5,7 +5,10 @@
  *
  * During Cordis plugin initialization, the web server returns 404 for
  * unmatched routes (the SPA fallback seat has not been claimed yet). This
- * is expected — the probe treats 404 as "still booting" and keeps polling.
+ * is expected — the probe keeps polling. On timeout, the error message
+ * includes the distribution of observed responses (status codes and
+ * connection errors), which distinguishes "still booting" (404s) from a
+ * permanent backend fault (400s, 403s, ECONNREFUSED, or no response).
  * @module electron/ready
  */
 
@@ -23,55 +26,78 @@ export interface WaitForReadyOptions {
   signal?: AbortSignal
 }
 
-/** Default total timeout: 90 s — Cordis plugin tree with 50+ plugins can be slow on Windows. */
+/** Default total timeout: 90 s — the Cordis plugin tree (50+ plugins) can be slow to settle on Windows. */
 const DEFAULT_TIMEOUT_MS = 90_000
 
 /** Default polling interval: 500 ms — generous to avoid spamming the server during boot. */
 const DEFAULT_INTERVAL_MS = 500
 
+/** Outcome of one probe: either an HTTP status code or a connection-level failure. */
+type ProbeResult = { kind: 'status', code: number } | { kind: 'error', message: string }
+
 /**
- * Probe a URL with a short GET and resolve when the first 200 arrives.
+ * Probe a URL with a short GET.
  * @param url - the URL to probe.
- * @returns `true` if the server responded 200, `false` on non-200.
+ * @returns the HTTP status code, or the connection error message.
  */
-function probe(url: string): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
+function probe(url: string): Promise<ProbeResult> {
+  return new Promise<ProbeResult>((resolve) => {
     const req = request(url, { method: 'GET', timeout: 3000 }, (res) => {
       res.resume()
-      resolve(res.statusCode === 200)
+      resolve({ kind: 'status', code: res.statusCode ?? 0 })
     })
-    req.on('error', () => resolve(false))
-    req.on('timeout', () => { req.destroy(); resolve(false) })
+    req.on('error', (err: NodeJS.ErrnoException) => {
+      resolve({ kind: 'error', message: err.code ?? err.message })
+    })
+    req.on('timeout', () => { req.destroy(); resolve({ kind: 'error', message: 'ETIMEDOUT' }) })
     req.end()
   })
+}
+
+/**
+ * Render a probe-result tally for diagnostics, e.g.
+ * `404 x12, ECONNREFUSED x3`.
+ * @param counts - observed probe results to their occurrence counts.
+ * @returns the compact summary, or `no responses` when nothing was observed.
+ */
+export function summarizeProbeResults(counts: Map<string, number>): string {
+  if (counts.size === 0) return 'no responses'
+  return [...counts.entries()].map(([key, n]) => `${key} x${String(n)}`).join(', ')
 }
 
 /**
  * Poll a URL until it responds HTTP 200, or reject on timeout / cancellation.
  * @param options - URL, timeouts, and optional cancel signal.
  * @returns resolves when the server is ready.
- * @throws on timeout, external cancellation, or a probe that never succeeds.
+ * @throws on timeout (with the observed response summary), external
+ * cancellation, or a probe that never succeeds.
  */
 export async function waitForReady(options: WaitForReadyOptions): Promise<void> {
   const { url, signal } = options
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS
   const deadline = Date.now() + timeoutMs
+  const observed = new Map<string, number>()
+
+  const record = (result: ProbeResult): void => {
+    const key = result.kind === 'status' ? `HTTP ${String(result.code)}` : result.message
+    observed.set(key, (observed.get(key) ?? 0) + 1)
+  }
 
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new Error(`ready: aborted while waiting for ${url}`)
-    if (await probe(url)) return
+    const result = await probe(url)
+    record(result)
+    if (result.kind === 'status' && result.code === 200) return
     await sleep(intervalMs)
   }
-  throw new Error(`ready: ${url} did not respond within ${String(timeoutMs)} ms`)
+  throw new Error(
+    `ready: ${url} did not respond with HTTP 200 within ${String(timeoutMs)} ms `
+    + `(observed: ${summarizeProbeResults(observed)})`,
+  )
 }
 
-/** Promise-based sleep that an AbortSignal can cut short. */
+/** Promise-based sleep. */
 function sleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms)
-    if (typeof process !== 'undefined' && typeof process.on === 'function') {
-      process.once('exit', () => { clearTimeout(timer); resolve() })
-    }
-  })
+  return new Promise<void>((resolve) => { setTimeout(resolve, ms) })
 }

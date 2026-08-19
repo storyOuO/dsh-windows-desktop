@@ -6,14 +6,11 @@ directories:
   output: build/out
   buildResources: build
 
-asar: true
-asarUnpack:
-  - node_modules/**/*.{node,dll}
-  - node_modules/node-pty/**
-  - node_modules/@parcel/watcher/**
-  - node_modules/@deepseek-ai/dsh-subprocess-local/**
-  - node_modules/@deepseek-ai/dsh-web-frontend/dist/**
-  - node_modules/@deepseek-ai/dsh-web-frontend/**
+# asar disabled: the dsh backend runs via ELECTRON_RUN_AS_NODE=1, and asar
+# archives caused repeated Windows-only failures (module resolution, file
+# reads, unpacked-file redirection). Real files on disk eliminate the whole
+# class of asar problems at a modest size cost.
+asar: false
 
 files:
   - dist/**/*
